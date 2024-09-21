@@ -1,5 +1,5 @@
 /*
-See LICENSE folder for this sample’s licensing information.
+See LICENSE folder for this sample's licensing information.
 
 Abstract:
 An object that connects the camera controller and the views.
@@ -11,6 +11,7 @@ import Combine
 import simd
 import AVFoundation
 import SceneKit
+import UniformTypeIdentifiers
 
 class CameraManager: ObservableObject, CaptureDataReceiver {
 
@@ -138,6 +139,9 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
         hasRecordedFrames = !recordedFrames.isEmpty
     }
 
+    @Published var isExporting = false
+    @Published var exportError: String?
+
     func exportFaceModel() {
         guard !recordedFrames.isEmpty else {
             print("No recorded frames to export")
@@ -147,9 +151,33 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
         // Process recorded frames and generate face model
         let faceModel = generateFaceModel(from: recordedFrames)
 
-        // Export as .obj and .mtl files
-        exportOBJ(faceModel)
-        exportMTL(faceModel)
+        // Generate OBJ and MTL data
+        let objData = generateOBJData(from: faceModel)
+        let mtlData = generateMTLData(from: faceModel)
+
+        // Start the export process
+        isExporting = true
+        presentSavePicker(objData: objData, mtlData: mtlData)
+    }
+
+    private func presentSavePicker(objData: Data, mtlData: Data) {
+        DispatchQueue.main.async {
+            let exportViewController = ExportViewController(objData: objData, mtlData: mtlData) { result in
+                switch result {
+                case .success:
+                    print("Files exported successfully")
+                case .failure(let error):
+                    print("Error exporting files: \(error.localizedDescription)")
+                    self.exportError = "Failed to export files. Please try again."
+                }
+                self.isExporting = false
+            }
+            
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootViewController = windowScene.windows.first?.rootViewController {
+                rootViewController.present(exportViewController, animated: true, completion: nil)
+            }
+        }
     }
 
     private func generateFaceModel(from frames: [CameraCapturedData]) -> SCNNode {
@@ -157,18 +185,6 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
         // This is a placeholder and needs to be implemented based on your specific requirements
         let geometry = SCNGeometry()
         return SCNNode(geometry: geometry)
-    }
-
-    private func exportOBJ(_ model: SCNNode) {
-        let objData = generateOBJData(from: model)
-        saveToFile(data: objData, fileName: "face_model.obj")
-        print("Exported OBJ file")
-    }
-
-    private func exportMTL(_ model: SCNNode) {
-        let mtlData = generateMTLData(from: model)
-        saveToFile(data: mtlData, fileName: "face_model.mtl")
-        print("Exported MTL file")
     }
 
     private func generateOBJData(from model: SCNNode) -> Data {
@@ -250,29 +266,6 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
         
         return mtlString.data(using: .utf8) ?? Data()
     }
-
-    private func saveToFile(data: Data, fileName: String) {
-        guard let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            print("Unable to access documents directory")
-            return
-        }
-        
-        let lidarCaptureFolder = documentsDirectory.appendingPathComponent("LiDARCapture")
-        
-        do {
-            // Create the LiDARCapture folder if it doesn't exist
-            if !FileManager.default.fileExists(atPath: lidarCaptureFolder.path) {
-                try FileManager.default.createDirectory(at: lidarCaptureFolder, withIntermediateDirectories: true, attributes: nil)
-            }
-            
-            let fileURL = lidarCaptureFolder.appendingPathComponent(fileName)
-            
-            try data.write(to: fileURL)
-            print("File saved successfully at: \(fileURL.path)")
-        } catch {
-            print("Error saving file: \(error.localizedDescription)")
-        }
-    }
 }
 
 class CameraCapturedData {
@@ -294,5 +287,128 @@ class CameraCapturedData {
         self.colorCbCr = colorCbCr
         self.cameraIntrinsics = cameraIntrinsics
         self.cameraReferenceDimensions = cameraReferenceDimensions
+    }
+}
+
+struct OBJDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.objFile] }
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+struct MTLDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.mtlFile] }
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+class ExportViewController: UIViewController {
+    private var objData: Data
+    private var mtlData: Data
+    private var completion: (Result<Void, Error>) -> Void
+
+    init(objData: Data, mtlData: Data, completion: @escaping (Result<Void, Error>) -> Void) {
+        self.objData = objData
+        self.mtlData = mtlData
+        self.completion = completion
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        exportOBJ()
+    }
+
+    private func exportOBJ() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("model.obj")
+        do {
+            try objData.write(to: tempURL)
+            let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+            picker.shouldShowFileExtensions = true
+            present(picker, animated: true, completion: nil)
+        } catch {
+            completion(.failure(error))
+            dismiss(animated: true, completion: nil)
+        }
+    }
+
+    private func exportMTL() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("model.mtl")
+        do {
+            try mtlData.write(to: tempURL)
+            let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+            picker.shouldShowFileExtensions = true
+            present(picker, animated: true, completion: nil)
+        } catch {
+            completion(.failure(error))
+            dismiss(animated: true, completion: nil)
+        }
+    }
+}
+
+extension ExportViewController: UIDocumentPickerDelegate {
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let url = urls.first else {
+            completion(.failure(NSError(domain: "ExportError", code: 1, userInfo: [NSLocalizedDescriptionKey: "No file selected"])))
+            return
+        }
+
+        if url.lastPathComponent.hasSuffix(".obj") {
+            exportMTL()
+        } else if url.lastPathComponent.hasSuffix(".mtl") {
+            completion(.success(()))
+            dismiss(animated: true, completion: nil)
+        }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        completion(.failure(NSError(domain: "ExportError", code: 2, userInfo: [NSLocalizedDescriptionKey: "Export was cancelled"])))
+        dismiss(animated: true, completion: nil)
+    }
+}
+
+extension UTType {
+    static var objFile: UTType {
+        UTType(filenameExtension: "obj")!
+    }
+    
+    static var mtlFile: UTType {
+        UTType(filenameExtension: "mtl")!
     }
 }
