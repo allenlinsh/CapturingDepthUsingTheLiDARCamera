@@ -33,13 +33,17 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
         capturedData = CameraCapturedData()
         controller = CameraController()
         controller.isFilteringEnabled = true
-        controller.startStream()
         isFilteringDepth = controller.isFilteringEnabled
         
         NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification).sink { _ in
             self.orientation = UIDevice.current.orientation
         }.store(in: &cancellables)
         controller.delegate = self
+        
+        // Start the stream on a background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.controller.startStream()
+        }
     }
     
     func startPhotoCapture() {
@@ -48,9 +52,13 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
     }
     
     func resumeStream() {
-        controller.startStream()
-        processingCapturedResult = false
-        waitingForCapture = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.controller.startStream()
+            DispatchQueue.main.async {
+                self.processingCapturedResult = false
+                self.waitingForCapture = false
+            }
+        }
     }
     
     func onNewPhotoData(capturedData: CameraCapturedData) {
@@ -79,7 +87,37 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
             }
         }
     }
-   
+    
+    @Published var currentCameraPosition: AVCaptureDevice.Position = .back
+    
+    @Published var cameraError: String?
+
+    func switchCamera() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try self.controller.switchCamera()
+                DispatchQueue.main.async {
+                    self.cameraError = nil
+                }
+            } catch CameraController.ConfigurationError.lidarDeviceUnavailable {
+                print("Error switching camera: LiDAR or TrueDepth camera unavailable")
+                DispatchQueue.main.async {
+                    self.cameraError = "This device doesn't support depth capture on the selected camera."
+                }
+            } catch {
+                print("Error switching camera: \(error)")
+                DispatchQueue.main.async {
+                    self.cameraError = "Unable to switch camera. An unexpected error occurred."
+                }
+            }
+        }
+    }
+
+    func onCameraPositionChanged(position: AVCaptureDevice.Position) {
+        DispatchQueue.main.async {
+            self.currentCameraPosition = position
+        }
+    }
 }
 
 class CameraCapturedData {

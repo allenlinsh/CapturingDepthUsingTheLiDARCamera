@@ -30,6 +30,17 @@ struct ContentView: View {
                         .font(.largeTitle)
                 }
                 
+                Button {
+                    manager.switchCamera()
+                } label: {
+                    Image(systemName: "camera.rotate")
+                        .font(.largeTitle)
+                }
+                
+                Text(manager.currentCameraPosition == .back ? "LiDAR" : "TrueDepth")
+                    .font(.caption)
+                    .padding(.horizontal)
+                
                 Text("Depth Filtering")
                 Toggle("Depth Filtering", isOn: $manager.isFilteringDepth).labelsHidden()
                 Spacer()
@@ -77,6 +88,11 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            if let error = manager.cameraError {
+                Text(error)
+                    .foregroundColor(.red)
+                    .padding()
             }
         }
     }

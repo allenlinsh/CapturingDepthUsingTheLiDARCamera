@@ -1,5 +1,5 @@
 /*
-See LICENSE folder for this sample’s licensing information.
+See LICENSE folder for this sample's licensing information.
 
 Abstract:
 An object that configures and manages the capture pipeline to stream video and LiDAR depth data.
@@ -8,10 +8,12 @@ An object that configures and manages the capture pipeline to stream video and L
 import Foundation
 import AVFoundation
 import CoreImage
+import Metal
 
 protocol CaptureDataReceiver: AnyObject {
     func onNewData(capturedData: CameraCapturedData)
     func onNewPhotoData(capturedData: CameraCapturedData)
+    func onCameraPositionChanged(position: AVCaptureDevice.Position)
 }
 
 class CameraController: NSObject, ObservableObject {
@@ -23,7 +25,7 @@ class CameraController: NSObject, ObservableObject {
     
     private let preferredWidthResolution = 1920
     
-    private let videoQueue = DispatchQueue(label: "com.example.apple-samplecode.VideoQueue", qos: .userInteractive)
+    private let videoQueue = DispatchQueue(label: "dev.allenlin.VideoQueue", qos: .userInteractive)
     
     private(set) var captureSession: AVCaptureSession!
     
@@ -32,7 +34,7 @@ class CameraController: NSObject, ObservableObject {
     private var videoDataOutput: AVCaptureVideoDataOutput!
     private var outputVideoSync: AVCaptureDataOutputSynchronizer!
     
-    private var textureCache: CVMetalTextureCache!
+    private var textureCache: CVMetalTextureCache?
     
     weak var delegate: CaptureDataReceiver?
     
@@ -42,21 +44,26 @@ class CameraController: NSObject, ObservableObject {
         }
     }
     
+    public private(set) var currentCameraPosition: AVCaptureDevice.Position = .back
+    
+    private var frontCameraDevice: AVCaptureDevice?
+    private var backCameraDevice: AVCaptureDevice?
+
     override init() {
-        
-        // Create a texture cache to hold sample buffer textures.
-        CVMetalTextureCacheCreate(kCFAllocatorDefault,
-                                  nil,
-                                  MetalEnvironment.shared.metalDevice,
-                                  nil,
-                                  &textureCache)
-        
         super.init()
+        
+        // Initialize the texture cache
+        let metalDevice = MTLCreateSystemDefaultDevice()!
+        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, metalDevice, nil, &textureCache)
+        
+        // Initialize both front and back camera devices
+        backCameraDevice = AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back)
+        frontCameraDevice = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front)
         
         do {
             try setupSession()
         } catch {
-            fatalError("Unable to configure the capture session.")
+            fatalError("Unable to configure the capture session: \(error.localizedDescription)")
         }
     }
     
@@ -75,8 +82,14 @@ class CameraController: NSObject, ObservableObject {
     }
     
     private func setupCaptureInput() throws {
-        // Look up the LiDAR camera.
-        guard let device = AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back) else {
+        let deviceType: AVCaptureDevice.DeviceType
+        if currentCameraPosition == .back {
+            deviceType = .builtInLiDARDepthCamera
+        } else {
+            deviceType = .builtInTrueDepthCamera
+        }
+        
+        guard let device = AVCaptureDevice.default(deviceType, for: .video, position: currentCameraPosition) else {
             throw ConfigurationError.lidarDeviceUnavailable
         }
         
@@ -145,11 +158,47 @@ class CameraController: NSObject, ObservableObject {
     }
     
     func startStream() {
+        // This method is now called on a background thread from CameraManager
         captureSession.startRunning()
     }
     
     func stopStream() {
+        // Ensure this is called on a background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.captureSession.stopRunning()
+        }
+    }
+    
+    func switchCamera() throws {
+        // Stop the current session
         captureSession.stopRunning()
+        
+        // Remove existing inputs and outputs
+        captureSession.inputs.forEach { captureSession.removeInput($0) }
+        captureSession.outputs.forEach { captureSession.removeOutput($0) }
+        
+        // Switch camera position
+        currentCameraPosition = (currentCameraPosition == .back) ? .front : .back
+        
+        // Reconfigure the session
+        captureSession.beginConfiguration()
+        do {
+            try setupCaptureInput()
+            setupCaptureOutputs()
+            captureSession.commitConfiguration()
+        } catch {
+            captureSession.commitConfiguration()
+            // If setting up the new camera fails, switch back and try again
+            currentCameraPosition = (currentCameraPosition == .back) ? .front : .back
+            try setupCaptureInput()
+            setupCaptureOutputs()
+        }
+        
+        // Restart the session
+        captureSession.startRunning()
+        
+        // Notify the delegate about the camera switch
+        delegate?.onCameraPositionChanged(position: currentCameraPosition)
     }
 }
 
@@ -163,7 +212,8 @@ extension CameraController: AVCaptureDataOutputSynchronizerDelegate {
               let syncedVideoData = synchronizedDataCollection.synchronizedData(for: videoDataOutput) as? AVCaptureSynchronizedSampleBufferData else { return }
         
         guard let pixelBuffer = syncedVideoData.sampleBuffer.imageBuffer,
-              let cameraCalibrationData = syncedDepthData.depthData.cameraCalibrationData else { return }
+              let cameraCalibrationData = syncedDepthData.depthData.cameraCalibrationData,
+              let textureCache = self.textureCache else { return }
         
         // Package the captured data.
         let data = CameraCapturedData(depth: syncedDepthData.depthData.depthDataMap.texture(withFormat: .r16Float, planeIndex: 0, addToCache: textureCache),
@@ -195,11 +245,11 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
     }
     
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        
         // Retrieve the image and depth data.
         guard let pixelBuffer = photo.pixelBuffer,
               let depthData = photo.depthData,
-              let cameraCalibrationData = depthData.cameraCalibrationData else { return }
+              let cameraCalibrationData = depthData.cameraCalibrationData,
+              let textureCache = self.textureCache else { return }
         
         // Stop the stream until the user returns to streaming mode.
         stopStream()
