@@ -1,5 +1,5 @@
 /*
-See LICENSE folder for this sample's licensing information.
+See LICENSE folder for this sample’s licensing information.
 
 Abstract:
 An object that connects the camera controller and the views.
@@ -11,7 +11,6 @@ import Combine
 import simd
 import AVFoundation
 import SceneKit
-import UIKit
 
 class CameraManager: ObservableObject, CaptureDataReceiver {
 
@@ -151,11 +150,6 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
         // Export as .obj and .mtl files
         exportOBJ(faceModel)
         exportMTL(faceModel)
-        
-        // Show save prompt
-        DispatchQueue.main.async {
-            self.showingSavePrompt = true
-        }
     }
 
     private func generateFaceModel(from frames: [CameraCapturedData]) -> SCNNode {
@@ -275,7 +269,6 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
             
             try data.write(to: fileURL)
             print("File saved successfully at: \(fileURL.path)")
-            savedFilePath = fileURL.path
         } catch {
             print("Error saving file: \(error.localizedDescription)")
         }
